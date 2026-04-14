@@ -1,4 +1,4 @@
-# cb — Binary Analysis Toolkit for macOS/iOS Security Research
+# cb  - Binary Analysis Toolkit for macOS/iOS Security Research
 
 A command-line toolkit for binary security analysis, vulnerability research, and exploit development on macOS and iOS targets. 30+ commands covering reconnaissance, vulnerability scanning, IPC analysis, crash triage, fuzzer generation, Ghidra/LLDB integration, and more.
 
@@ -7,45 +7,45 @@ Built for security researchers, bug bounty hunters, and red teamers working on A
 ## Features
 
 **Reconnaissance**
-- `cb triage` — Quick security overview (protections, imports, strings, sections)
-- `cb attack` — Attack surface mapping (IPC endpoints, parsers, entitlements)
-- `cb objc` — Objective-C runtime analysis (classes, selectors, dangerous methods)
-- `cb grep` — Binary content search (disassembly, bytes, strings, ROP/JOP gadgets)
+- `cb triage`  - Quick security overview (protections, imports, strings, sections)
+- `cb attack`  - Attack surface mapping (IPC endpoints, parsers, entitlements)
+- `cb objc`  - Objective-C runtime analysis (classes, selectors, dangerous methods)
+- `cb grep`  - Binary content search (disassembly, bytes, strings, ROP/JOP gadgets)
 
 **Vulnerability Analysis**
-- `cb vuln` — Pattern-based vulnerability scanner with optional Ghidra decompilation
-- `cb variant` — Find variant bugs from 12 known vulnerability patterns
-- `cb taint` — Inter-procedural taint tracking (sources to sinks via Ghidra)
-- `cb callgraph` — Call graph recovery and dangerous sink reachability
-- `cb audit` — Full security audit (runs triage + attack + vuln + objc + ipc + sandbox + variant)
+- `cb vuln`  - Pattern-based vulnerability scanner with optional Ghidra decompilation
+- `cb variant`  - Find variant bugs from 12 known vulnerability patterns
+- `cb taint`  - Inter-procedural taint tracking (sources to sinks via Ghidra)
+- `cb callgraph`  - Call graph recovery and dangerous sink reachability
+- `cb audit`  - Full security audit (runs triage + attack + vuln + objc + ipc + sandbox + variant)
 
 **IPC & Sandbox**
-- `cb ipc` — XPC/Mach/MIG handler analysis
-- `cb sandbox` — Sandbox profile and entitlement analysis
-- `cb probe` — Live XPC service probing (compiles ObjC probe binary on first use)
+- `cb ipc`  - XPC/Mach/MIG handler analysis
+- `cb sandbox`  - Sandbox profile and entitlement analysis
+- `cb probe`  - Live XPC service probing (compiles ObjC probe binary on first use)
 
 **Dynamic Analysis**
-- `cb lldb` — Scripted LLDB debugging (modules, symbols, memory, breakpoints)
-- `cb hook` — Frida instrumentation harness generation
-- `cb verify` — Run binaries under macOS memory guards (MallocGuardEdges, MallocScribble)
+- `cb lldb`  - Scripted LLDB debugging (modules, symbols, memory, breakpoints)
+- `cb hook`  - Frida instrumentation harness generation
+- `cb verify`  - Run binaries under macOS memory guards (MallocGuardEdges, MallocScribble)
 
 **Exploit Development**
-- `cb cache` — Extract binaries from dyld shared cache
-- `cb struct` — Recover struct field layouts from ARM64 disassembly
-- `cb heap` — macOS heap zone classification and spray planning
-- `cb gadget` — ARM64 ROP/JOP gadget finder and chain builder (PAC-aware)
+- `cb cache`  - Extract binaries from dyld shared cache
+- `cb struct`  - Recover struct field layouts from ARM64 disassembly
+- `cb heap`  - macOS heap zone classification and spray planning
+- `cb gadget`  - ARM64 ROP/JOP gadget finder and chain builder (PAC-aware)
 
 **Crash Analysis**
-- `cb crash` — Crash report parser with exploitability assessment and PoC generation
-- `cb diff` — Binary version diffing with security-focused mode
+- `cb crash`  - Crash report parser with exploitability assessment and PoC generation
+- `cb diff`  - Binary version diffing with security-focused mode
 
 **Web Security**
-- `cb web` — Security header, CSP, CORS, cookie, and endpoint auditing
+- `cb web`  - Security header, CSP, CORS, cookie, and endpoint auditing
 
 **Workflow**
-- `cb plan` — Generate deterministic audit plans from triage data
-- `cb report` — Structured vulnerability reports (Markdown, HTML, bug bounty templates)
-- `cb context` — Token budget management for AI-assisted workflows
+- `cb plan`  - Generate deterministic audit plans from triage data
+- `cb report`  - Structured vulnerability reports (Markdown, HTML, bug bounty templates)
+- `cb context`  - Token budget management for AI-assisted workflows
 
 ## Install
 
