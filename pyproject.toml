@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catbyte-toolkit"
+version = "1.4.0"
+description = "Binary analysis toolkit for security research"
+requires-python = ">=3.10"
+dependencies = [
+    "pwntools>=4.12",
+    "capstone>=5.0",
+    "pyelftools>=0.29",
+    "ROPGadget>=7.0",
+]
+
+[project.optional-dependencies]
+full = ["lief>=0.14"]
+
+[project.scripts]
+cb = "cb.cli:main"
+cbtriage = "cb.commands.triage:main"
+cbghidra = "cb.commands.ghidra:main"
+cbvuln = "cb.commands.vuln:main"
+cbgrep = "cb.commands.grep:main"
+cbcrash = "cb.commands.crash:main"
+cbattack = "cb.commands.attack:main"
+cbdiff = "cb.commands.diff:main"
+cbfuzz = "cb.commands.fuzz:main"
+cbtaint = "cb.commands.taint:main"
+cbcallgraph = "cb.commands.callgraph:main"
+cbobjc = "cb.commands.objc:main"
+cbsandbox = "cb.commands.sandbox:main"
+cbipc = "cb.commands.ipc:main"
+cbvariant = "cb.commands.variant:main"
+cbaudit = "cb.commands.audit:main"
+cbhook = "cb.commands.hook:main"
+cblldb = "cb.commands.lldb:main"
+cbprobe = "cb.commands.probe:main"
+cbcache = "cb.commands.cache:main"
+cbstruct = "cb.commands.struct:main"
+cbheap = "cb.commands.heap:main"
+cbgadget = "cb.commands.gadget:main"
+cbplan = "cb.commands.plan:main"
+cbverify = "cb.commands.verify:main"
+cbcontext = "cb.commands.context:main"
+cbreport = "cb.commands.report:main"
+cbweb = "cb.commands.web:main"
+cbsession = "cb.commands.session:main"
+cbbundle = "cb.commands.bundle:main"
+cbdb = "cb.commands.db:main"
+cbmodels = "cb.commands.models:main"
+
+[tool.setuptools.packages.find]
+include = ["cb*"]

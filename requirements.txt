@@ -1,0 +1,5 @@
+pwntools>=4.12
+capstone>=5.0
+pyelftools>=0.29
+ROPGadget>=7.0
+lief>=0.14
