@@ -97,6 +97,53 @@ def aes_te0() -> bytes:
     return bytes(out)
 
 
+def aes_td0() -> bytes:
+    """AES inverse T-table Td0 (used by software AES decrypt in OpenSSL etc.)
+
+    Td0[a] = [InvS[a]·0e, InvS[a]·09, InvS[a]·0d, InvS[a]·0b] little-endian
+    arranged. Many implementations store as four 32-bit values per entry.
+    """
+    inv = aes_inv_sbox()
+    out = bytearray()
+    for i in range(256):
+        s = inv[i]
+        # Standard Td0 layout: 0x{e}{9}{d}{b} arrangement, but per OpenSSL
+        # source it's stored as 0x e_xx_xx_xx where the bytes are
+        # GF(2^8)·{0e, 09, 0d, 0b} of inv-sbox[i].
+        b0 = _gf_mul(s, 0x0e)
+        b1 = _gf_mul(s, 0x09)
+        b2 = _gf_mul(s, 0x0d)
+        b3 = _gf_mul(s, 0x0b)
+        # OpenSSL stores BE 32-bit
+        out += struct.pack(">BBBB", b0, b1, b2, b3)
+    return bytes(out)
+
+
+def aes_td_le(shift: int = 0) -> bytes:
+    """OpenSSL-style Td-table stored as 32-bit LE values (matches ARM64/x86).
+
+    Td0[i] = ROL(base_word, shift*8), where base_word for InvS[i]=s is
+    composed of gf_mul(s, 0x0e/0x09/0x0d/0x0b). OpenSSL ships four
+    rotated copies (Td0..Td3) for performance.
+    """
+    inv = aes_inv_sbox()
+    out = bytearray()
+    for i in range(256):
+        s = inv[i]
+        b_e = _gf_mul(s, 0x0e)
+        b_9 = _gf_mul(s, 0x09)
+        b_d = _gf_mul(s, 0x0d)
+        b_b = _gf_mul(s, 0x0b)
+        # Compose 32-bit base value matching OpenSSL Td0
+        # Td0[0]=0x51f4a750 → bytes LE: 50 a7 f4 51
+        word = (b_e << 24) | (b_9 << 16) | (b_d << 8) | b_b
+        # Apply rotation
+        if shift:
+            word = ((word << (8 * shift)) | (word >> (32 - 8 * shift))) & 0xffffffff
+        out += struct.pack("<I", word)
+    return bytes(out)
+
+
 def sha256_k() -> bytes:
     """SHA-256 round constants K — 64 32-bit words from cube roots of primes."""
     primes = []
@@ -360,7 +407,22 @@ def build_fingerprints() -> list[Fingerprint]:
                     "Decryption S-box. Presence implies AES decrypt is implemented (vs. encrypt-only).",
                     "table"),
         Fingerprint("AES Te0 T-table", "aes", aes_te0(), "be", "ok", 0.95,
-                    "Fast software AES table (OpenSSL-style). 1024 bytes.",
+                    "Fast software AES forward T-table (OpenSSL-style). 1024 bytes.",
+                    "table"),
+        Fingerprint("AES Td0 T-table (BE)", "aes", aes_td0(), "be", "ok", 0.95,
+                    "Fast software AES inverse T-table, big-endian word storage. 1024 bytes.",
+                    "table"),
+        Fingerprint("AES Td0 T-table", "aes", aes_td_le(0), "le", "ok", 0.95,
+                    "AES inverse T-table Td0 (OpenSSL-style, LE 32-bit words). 1024 bytes.",
+                    "table"),
+        Fingerprint("AES Td1 T-table", "aes", aes_td_le(1), "le", "ok", 0.95,
+                    "AES inverse T-table Td1 (Td0 rotated 8 bits). 1024 bytes.",
+                    "table"),
+        Fingerprint("AES Td2 T-table", "aes", aes_td_le(2), "le", "ok", 0.95,
+                    "AES inverse T-table Td2 (Td0 rotated 16 bits). 1024 bytes.",
+                    "table"),
+        Fingerprint("AES Td3 T-table", "aes", aes_td_le(3), "le", "ok", 0.95,
+                    "AES inverse T-table Td3 (Td0 rotated 24 bits). 1024 bytes.",
                     "table"),
     ]
 
