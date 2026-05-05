@@ -50,6 +50,7 @@ cbsession = "cb.commands.session:main"
 cbbundle = "cb.commands.bundle:main"
 cbdb = "cb.commands.db:main"
 cbmodels = "cb.commands.models:main"
+cbcrypto = "cb.commands.crypto:main"
 
 [tool.setuptools.packages.find]
 include = ["cb*"]

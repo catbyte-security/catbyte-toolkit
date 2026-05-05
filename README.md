@@ -1,6 +1,6 @@
 # cb  - Binary Analysis Toolkit for macOS/iOS Security Research
 
-A command-line toolkit for binary security analysis, vulnerability research, and exploit development on macOS and iOS targets. 30+ commands covering reconnaissance, vulnerability scanning, IPC analysis, crash triage, fuzzer generation, Ghidra/LLDB integration, and more.
+A command-line toolkit for binary security analysis, vulnerability research, and exploit development on macOS and iOS targets. 30+ commands covering reconnaissance, vulnerability scanning, IPC analysis, crash triage, fuzzer generation, cryptographic primitive detection, Ghidra/LLDB integration, and more.
 
 Built for security researchers, bug bounty hunters, and red teamers working on Apple platforms.
 
@@ -18,6 +18,9 @@ Built for security researchers, bug bounty hunters, and red teamers working on A
 - `cb taint`  - Inter-procedural taint tracking (sources to sinks via Ghidra)
 - `cb callgraph`  - Call graph recovery and dangerous sink reachability
 - `cb audit`  - Full security audit (runs triage + attack + vuln + objc + ipc + sandbox + variant)
+
+**Cryptographic Analysis**
+- `cb crypto`  - Identify crypto primitives in stripped binaries by byte fingerprint (AES S-box, SHA round constants, ECC curve parameters, etc.). Flags weak/broken algorithms (MD5, DES, RC4, SHA-1) and rolled crypto (modified S-boxes detected by Hamming distance).
 
 **IPC & Sandbox**
 - `cb ipc`  - XPC/Mach/MIG handler analysis
@@ -89,6 +92,11 @@ cb probe com.apple.securityd --enumerate-messages
 cb crash report.ips --generate-poc --poc-output poc.py
 cb variant --from-crash report.ips --heuristic
 
+# Cryptographic primitive detection
+cb crypto /opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib --render text
+cb crypto suspect.bin --algorithms aes,des,rc4 --render markdown -o report.md
+cb crypto firmware.bin --no-heuristics       # constants only, fastest
+
 # Exploit chain development
 cb cache extract-all --targets exploit
 cb struct recover ~/.cb/dsc_extract/*/SkyLight --functions SLSSetWindowLevel,SLSSetWindowAlpha
@@ -141,6 +149,48 @@ Optional config at `~/.cbconfig.json`:
 
 Ghidra is auto-detected from common install locations if not configured.
 
+## Cryptographic Analysis
+
+`cb crypto` detects cryptographic primitives in compiled binaries by their immutable byte fingerprints. You can strip symbols, but you cannot strip an AES S-box.
+
+**What it detects**
+
+- Block ciphers: AES, DES, Blowfish, RC2, TEA/XTEA
+- Stream ciphers: ChaCha20, Salsa20
+- Hashes: SHA-1/256/512, MD5, MD2, SHA-3/Keccak, BLAKE2b, BLAKE2s, Whirlpool
+- ECC curves: P-256, secp256k1, Curve25519, Ed25519
+- Asymmetric (via ASN.1 OIDs): RSA, ECDSA
+- CRC tables: CRC-32 IEEE, CRC-32C Castagnoli
+- Library markers: OpenSSL, LibreSSL, BoringSSL, CommonCrypto
+
+**Beyond constant matching**
+
+- Modified S-box detection: a 256-byte permutation that differs from the standard AES S-box by a small Hamming distance is a strong signal for rolled or "obfuscated" crypto.
+- High-entropy region detection: blocks of bytes with near-uniform distribution flag potential embedded keys, encrypted blobs, or packed code.
+- AES cluster detection: co-located AES tables in a small range strengthen confidence beyond a single hit.
+- Dual-use disambiguation: BLAKE2b IV bytes are identical to SHA-512 H init bytes; the scanner uses K-table presence to resolve ambiguity. Same for BLAKE2s vs SHA-256 and MD5 H vs SHA-1 H.
+
+**Risk-scored output**
+
+Every detected primitive is scored: `critical` for broken algorithms (MD5, DES, RC4, MD2), `warn` for deprecated ones (SHA-1, 3DES, Blowfish, RC2), `ok` for modern primitives (AES, SHA-256+, ChaCha20, Curve25519). Action items list specific replacement guidance.
+
+```bash
+# Colored TUI report with action items
+cb crypto target --render text
+
+# Markdown for audit docs / PR comments
+cb crypto target --render markdown -o crypto-audit.md
+
+# JSON for AI/pipeline consumption (default)
+cb crypto target --max-results 100
+
+# Restrict to a single family
+cb crypto target --algorithms aes,sha256,sha512
+
+# Tune the modified-S-box scan stride (lower = more thorough, higher = faster)
+cb crypto target --sbox-step 16
+```
+
 ## Chrome/Chromium Analysis
 
 Includes specialized patterns for Chrome security research:
@@ -162,7 +212,8 @@ cb/
   disasm.py           # Capstone disassembler + objdump fallback
   ghidra_bridge.py    # Ghidra headless analysis
   lldb_bridge.py      # LLDB scripted debugging
-  commands/           # One file per command (30 modules)
+  commands/           # One file per command (30+ modules)
+  crypto/             # Cryptographic primitive fingerprints, scanner, heuristics, report
   patterns/           # Vulnerability signatures, gadget patterns, Chrome patterns
   ghidra_scripts/     # Java scripts for Ghidra headless
   lldb_scripts/       # Python scripts for LLDB

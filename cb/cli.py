@@ -55,6 +55,7 @@ def main() -> None:
     from cb.commands.models import register as reg_models
     from cb.commands.kernel_vuln import register as reg_kernel_vuln
     from cb.commands.kernel_diff import register as reg_kernel_diff
+    from cb.commands.crypto import register as reg_crypto
 
     reg_triage(sub)
     reg_grep(sub)
@@ -89,6 +90,7 @@ def main() -> None:
     reg_models(sub)
     reg_kernel_vuln(sub)
     reg_kernel_diff(sub)
+    reg_crypto(sub)
 
     # Load user plugins
     _register_plugins(sub)
