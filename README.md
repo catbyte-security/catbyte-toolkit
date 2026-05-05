@@ -20,7 +20,7 @@ Built for security researchers, bug bounty hunters, and red teamers working on A
 - `cb audit`  - Full security audit (runs triage + attack + vuln + objc + ipc + sandbox + variant)
 
 **Cryptographic Analysis**
-- `cb crypto`  - Identify crypto primitives in stripped binaries by byte fingerprint (AES S-box, SHA round constants, ECC curve parameters, etc.). Flags weak/broken algorithms (MD5, DES, RC4, SHA-1) and rolled crypto (modified S-boxes detected by Hamming distance).
+- `cb crypto`  - Identify crypto primitives in stripped binaries by byte fingerprint (AES S-box, SHA round constants, ECC curve parameters, etc.), resolve cross-references to attribute primitives to functions, find hardcoded keys / static IVs, render an ASCII binary x-ray, compute a stable per-binary crypto fingerprint, and diff crypto profiles between two binaries.
 
 **IPC & Sandbox**
 - `cb ipc`  - XPC/Mach/MIG handler analysis
@@ -155,37 +155,49 @@ Ghidra is auto-detected from common install locations if not configured.
 
 **What it detects**
 
-- Block ciphers: AES, DES, Blowfish, RC2, TEA/XTEA
-- Stream ciphers: ChaCha20, Salsa20
-- Hashes: SHA-1/256/512, MD5, MD2, SHA-3/Keccak, BLAKE2b, BLAKE2s, Whirlpool
-- ECC curves: P-256, secp256k1, Curve25519, Ed25519
+- Block ciphers: AES (forward/inverse S-box, T-tables, Rcon), DES (8 S-boxes), Blowfish (P-array), RC2 (PITABLE), TEA/XTEA (delta), AES-GCM (GHASH polynomial)
+- Stream ciphers: ChaCha20, Salsa20 (sigma/tau strings)
+- Hashes: SHA-1/256/512, MD5, MD2, SHA-3/Keccak round constants, BLAKE2b, BLAKE2s, Whirlpool
+- MAC: HMAC ipad/opad pads (64- and 128-byte block variants), Poly1305 clamp mask
+- ECC curves: P-256, P-384, P-521, secp256k1, Curve25519, Ed25519, Brainpool P256r1
 - Asymmetric (via ASN.1 OIDs): RSA, ECDSA
+- KDFs / password hashing: PBKDF2, scrypt, Argon2 (i/d/id), bcrypt
 - CRC tables: CRC-32 IEEE, CRC-32C Castagnoli
 - Library markers: OpenSSL, LibreSSL, BoringSSL, CommonCrypto
 
 **Beyond constant matching**
 
-- Modified S-box detection: a 256-byte permutation that differs from the standard AES S-box by a small Hamming distance is a strong signal for rolled or "obfuscated" crypto.
-- High-entropy region detection: blocks of bytes with near-uniform distribution flag potential embedded keys, encrypted blobs, or packed code.
-- AES cluster detection: co-located AES tables in a small range strengthen confidence beyond a single hit.
-- Dual-use disambiguation: BLAKE2b IV bytes are identical to SHA-512 H init bytes; the scanner uses K-table presence to resolve ambiguity. Same for BLAKE2s vs SHA-256 and MD5 H vs SHA-1 H.
+- **Function-level cross-references.** For ARM64 and x86-64, the scanner walks `__text` with capstone (skipdata-aware to handle interleaved literal pools), resolves PC-relative loads (`ADRP+ADD/LDR` on ARM64, `LEA [rip+disp]` on x86-64), and attributes every crypto constant to the functions that load it. Mach-O `LC_FUNCTION_STARTS` and ELF `.symtab` give function boundaries and names.
+- **Hardcoded key / static IV detection.** For each function known to touch AES, the scanner inspects every PC-relative load it makes into `__const` / `__data` / `__DATA_CONST`, filters out zero blocks, single-byte runs, and ASCII text, and flags 16/24/32-byte high-entropy candidates as **AES key candidates** (severity: critical) and 16-byte non-zero candidates as **static IVs** (severity: warn). The entropy bar scales with size since random N-byte data is capped at log2(N) bits/byte.
+- **Modified S-box detection.** A 256-byte window that is a permutation of 0..255 but differs from the standard AES S-box by a small Hamming distance is a strong signal for rolled or obfuscated crypto.
+- **High-entropy region detection.** Sliding-window Shannon entropy over the file finds embedded keys, encrypted blobs, or packed code.
+- **Dual-use disambiguation.** BLAKE2b IV bytes are identical to SHA-512 H init bytes; the scanner uses K-table presence to resolve ambiguity. Same for BLAKE2s vs SHA-256 and MD5 H vs SHA-1 H.
+- **Crypto fingerprint.** A stable 64-bit hash over the sorted set of detected primitives. Two binaries with the same fingerprint share crypto profile, useful for malware family attribution and supply-chain regression detection. Library markers are excluded so a build switching from OpenSSL to BoringSSL with the same algorithm choices remains fingerprint-stable.
+- **ASCII binary x-ray.** A four-row visualization showing section labels, an entropy heatmap (block characters by density), per-column crypto markers (single-letter glyphs colored by severity), and a file-offset ruler. Renders the entire binary's crypto landscape in ~80 columns of terminal output.
+- **Crypto diff mode.** `cb crypto OLD --diff NEW` reports algorithms added, removed, or whose verdict regressed between two binaries.
 
 **Risk-scored output**
 
 Every detected primitive is scored: `critical` for broken algorithms (MD5, DES, RC4, MD2), `warn` for deprecated ones (SHA-1, 3DES, Blowfish, RC2), `ok` for modern primitives (AES, SHA-256+, ChaCha20, Curve25519). Action items list specific replacement guidance.
 
 ```bash
-# Colored TUI report with action items
+# Full report: xrefs, hardcoded keys, x-ray (text mode opens with color)
 cb crypto target --render text
 
-# Markdown for audit docs / PR comments
+# Markdown audit doc for PR comments
 cb crypto target --render markdown -o crypto-audit.md
 
 # JSON for AI/pipeline consumption (default)
 cb crypto target --max-results 100
 
+# Diff two binaries' crypto profiles
+cb crypto old.dylib --diff new.dylib
+
 # Restrict to a single family
 cb crypto target --algorithms aes,sha256,sha512
+
+# Constants-only mode (skip xrefs / heuristics / secrets / x-ray)
+cb crypto target --no-xrefs --no-heuristics --no-secrets --no-xray
 
 # Tune the modified-S-box scan stride (lower = more thorough, higher = faster)
 cb crypto target --sbox-step 16

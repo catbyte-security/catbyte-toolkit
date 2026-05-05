@@ -1,6 +1,7 @@
 """Risk scoring and human-readable report formatting."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from collections import defaultdict
@@ -46,6 +47,18 @@ ALGO_INFO = {
     "libressl":    {"family": "library-marker", "verdict": "info",    "reason": "LibreSSL library detected."},
     "boringssl":   {"family": "library-marker", "verdict": "info",    "reason": "BoringSSL library detected."},
     "commoncrypto":{"family": "library-marker", "verdict": "info",    "reason": "Apple CommonCrypto detected."},
+    "hmac":        {"family": "mac",              "verdict": "ok",    "reason": "Strong MAC if paired with SHA-2+. SHA-1 HMAC is OK but deprecated for new designs."},
+    "aes-gcm":     {"family": "block-cipher",     "verdict": "ok",    "reason": "AEAD mode for AES. Watch for nonce reuse — catastrophic."},
+    "poly1305":    {"family": "mac",              "verdict": "ok",    "reason": "Strong MAC. Combined with ChaCha20 → ChaCha20-Poly1305 AEAD."},
+    "p384":        {"family": "ecc",              "verdict": "ok",    "reason": "NIST P-384 (suite-B top)."},
+    "p521":        {"family": "ecc",              "verdict": "ok",    "reason": "NIST P-521 — large ECC curve."},
+    "brainpool":   {"family": "ecc",              "verdict": "ok",    "reason": "Brainpool curves. Used in some EU/government applications."},
+    "scrypt":      {"family": "kdf",              "verdict": "ok",    "reason": "Memory-hard password hash. Strong if parameters are sane."},
+    "argon2":      {"family": "kdf",              "verdict": "ok",    "reason": "Modern password hash, PHC winner. Argon2id is the recommended variant."},
+    "bcrypt":      {"family": "kdf",              "verdict": "ok",    "reason": "Old-school password hash. Still acceptable at cost ≥10."},
+    "pbkdf2":      {"family": "kdf",              "verdict": "ok",    "reason": "PBKDF2 key derivation. Tune iteration count appropriately."},
+    "kdf":         {"family": "kdf",              "verdict": "info",  "reason": "Generic KDF marker."},
+    "bitcoin":     {"family": "asymmetric",       "verdict": "info",  "reason": "Bitcoin-related code path detected."},
 }
 
 
@@ -57,20 +70,41 @@ def algo_info(algo: str) -> dict:
 # Aggregation
 # ──────────────────────────────────────────────────────────────────────
 
-def aggregate(result: ScanResult, refined_hits: list[Hit]) -> dict:
-    """Group hits by algorithm and compute the verdict."""
+def aggregate(result: ScanResult, refined_hits: list[Hit],
+              xrefs_by_hit: dict[int, list] | None = None) -> dict:
+    """Group hits by algorithm and compute the verdict.
+
+    If ``xrefs_by_hit`` is provided (mapping refined hit index -> list of
+    FunctionRef), the per-algorithm record includes the set of referencing
+    functions, which is the most actionable piece of information for a
+    reverse engineer.
+    """
+    xrefs_by_hit = xrefs_by_hit or {}
+
     by_algo: dict[str, list[Hit]] = defaultdict(list)
+    hit_to_idx: dict[int, int] = {id(h): i for i, h in enumerate(refined_hits)}
     for h in refined_hits:
         by_algo[h.fingerprint.algorithm].append(h)
 
     algorithms = []
     for algo, hits in sorted(by_algo.items(), key=lambda kv: (-max(SEVERITY_RANK[h.fingerprint.severity] for h in kv[1]), kv[0])):
         info = algo_info(algo)
-        # use max severity among hits; if any hit confidence ≥ 0.9, mark "high"
         hit_severities = [h.fingerprint.severity for h in hits]
         max_sev = max(hit_severities, key=lambda s: SEVERITY_RANK[s])
         confidence = max(h.fingerprint.confidence for h in hits)
         evidence = sorted({h.fingerprint.name for h in hits})
+
+        # Collect xref function names across all hits for this algorithm
+        ref_functions: set[str] = set()
+        ref_count_total = 0
+        for h in hits:
+            idx = hit_to_idx.get(id(h))
+            if idx is None:
+                continue
+            for ref in xrefs_by_hit.get(idx, []):
+                ref_functions.add(ref.function_name)
+                ref_count_total += 1
+
         sample_locations = []
         for h in hits[:3]:
             loc = {
@@ -91,6 +125,9 @@ def aggregate(result: ScanResult, refined_hits: list[Hit]) -> dict:
             "evidence_count": len(hits),
             "evidence_kinds": evidence,
             "sample_locations": sample_locations,
+            "xref_function_count": len(ref_functions),
+            "xref_total": ref_count_total,
+            "xref_functions": sorted(ref_functions)[:20],
         })
     return {"algorithms": algorithms, "by_algo": by_algo}
 
@@ -122,13 +159,47 @@ def overall_verdict(algorithms: list[dict]) -> dict:
 # JSON-ready dict
 # ──────────────────────────────────────────────────────────────────────
 
+def crypto_fingerprint(algorithms: list[dict]) -> str:
+    """Stable per-binary crypto fingerprint.
+
+    Two binaries with the same set of crypto primitives produce the same
+    fingerprint — useful for malware family attribution and supply-chain
+    regression detection. Library markers are excluded so a build switching
+    from OpenSSL to BoringSSL with the same algorithm choices remains
+    fingerprint-stable.
+    """
+    canonical = sorted({
+        a["algorithm"] for a in algorithms
+        if a["family"] != "library-marker"
+    })
+    payload = "\n".join(canonical).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]  # 64-bit prefix is plenty
+
+
 def to_dict(result: ScanResult,
              refined_hits: list[Hit],
              clusters: list[HeuristicHit],
              modified_sboxes: list[HeuristicHit],
-             high_entropy: list[HeuristicHit]) -> dict:
-    agg = aggregate(result, refined_hits)
+             high_entropy: list[HeuristicHit],
+             xrefs_by_hit: dict[int, list] | None = None,
+             secrets: list | None = None) -> dict:
+    """Build the JSON-ready report dict.
+
+    ``xrefs_by_hit``: mapping from refined hit index to list of FunctionRef.
+    ``secrets``: list of SecretCandidate objects.
+    """
+    agg = aggregate(result, refined_hits, xrefs_by_hit=xrefs_by_hit)
     verdict = overall_verdict(agg["algorithms"])
+    fp = crypto_fingerprint(agg["algorithms"])
+
+    # Bake xrefs into per-hit dicts as well
+    hits_out = []
+    for i, h in enumerate(refined_hits):
+        hd = h.to_dict()
+        if xrefs_by_hit and i in xrefs_by_hit:
+            hd["referenced_by"] = [r.to_dict() for r in xrefs_by_hit[i][:10]]
+            hd["referenced_by_total"] = len(xrefs_by_hit[i])
+        hits_out.append(hd)
 
     out = {
         "binary": result.binary_path,
@@ -136,6 +207,7 @@ def to_dict(result: ScanResult,
         "architecture": result.architecture,
         "file_size": result.file_size,
         "scan_seconds": result.scan_seconds,
+        "fingerprint": fp,
         "verdict": verdict,
         "summary": {
             "total_hits": len(refined_hits),
@@ -143,14 +215,17 @@ def to_dict(result: ScanResult,
             "ecc_curves": [a["algorithm"] for a in agg["algorithms"] if a["family"] == "ecc"],
             "weak_or_broken": [a["algorithm"] for a in agg["algorithms"]
                                 if a["verdict"] in ("critical", "warn") and a["family"] != "library-marker"],
+            "uses_kdf": [a["algorithm"] for a in agg["algorithms"] if a["family"] == "kdf"],
+            "hardcoded_secrets": len(secrets) if secrets else 0,
         },
         "algorithms": agg["algorithms"],
-        "hits": [h.to_dict() for h in refined_hits],
+        "hits": hits_out,
         "heuristics": {
             "aes_clusters": [c.to_dict() for c in clusters],
             "modified_sboxes": [m.to_dict() for m in modified_sboxes],
             "high_entropy_regions": [h.to_dict() for h in high_entropy],
         },
+        "secrets": [s.to_dict() for s in (secrets or [])],
     }
     return out
 
@@ -207,7 +282,8 @@ def _verdict_glyph(verdict: str) -> str:
     return {"critical": "[!]", "warn": "[~]", "ok": "[+]", "info": "[i]", "suspicious": "[?]"}.get(verdict, " ")
 
 
-def render_text(d: dict, color: bool | None = None) -> str:
+def render_text(d: dict, color: bool | None = None,
+                show_xray: bool = True) -> str:
     """Human-readable terminal report."""
     c = _C(_supports_color() if color is None else color)
     lines: list[str] = []
@@ -218,6 +294,9 @@ def render_text(d: dict, color: bool | None = None) -> str:
     lines.append(f"  binary:  {c.cyan}{d['binary']}{c.reset}")
     lines.append(f"  format:  {d['format']} / {d['architecture']}    "
                  f"size: {d['file_size']:,} bytes    scan: {d['scan_seconds']}s")
+    if "fingerprint" in d:
+        lines.append(f"  crypto fingerprint: {c.magenta}{d['fingerprint']}{c.reset}  "
+                     f"{c.dim}(stable per algorithm set){c.reset}")
     lines.append("")
 
     # Verdict
@@ -253,14 +332,25 @@ def render_text(d: dict, color: bool | None = None) -> str:
             for a in by_family[fam]:
                 vc = _verdict_color(c, a["verdict"])
                 gly = _verdict_glyph(a["verdict"])
+                xref_note = ""
+                if a.get("xref_function_count"):
+                    xref_note = f"{c.dim}, used by {a['xref_function_count']} func{'s' if a['xref_function_count']!=1 else ''}{c.reset}"
                 lines.append(f"      {vc}{gly}{c.reset} {c.bold}{a['algorithm']:14}{c.reset} "
                              f"{c.dim}({a['evidence_count']} hit{'s' if a['evidence_count']!=1 else ''}, "
-                             f"conf {a['confidence']}){c.reset}  {a['rationale']}")
+                             f"conf {a['confidence']}){xref_note}  {a['rationale']}")
                 # Show evidence
                 ev_str = ", ".join(a["evidence_kinds"][:4])
                 if len(a["evidence_kinds"]) > 4:
                     ev_str += f", … +{len(a['evidence_kinds'])-4} more"
                 lines.append(f"        {c.dim}↳ {ev_str}{c.reset}")
+                # Show xref functions (most actionable info)
+                if a.get("xref_functions"):
+                    fns = a["xref_functions"][:6]
+                    more = a["xref_function_count"] - len(fns)
+                    fns_str = ", ".join(fns)
+                    if more > 0:
+                        fns_str += f", … +{more} more"
+                    lines.append(f"        {c.dim}↳ used by:{c.reset} {fns_str}")
                 # Sample location
                 if a["sample_locations"]:
                     loc = a["sample_locations"][0]
@@ -298,6 +388,19 @@ def render_text(d: dict, color: bool | None = None) -> str:
                          f"{r['size']:>7,}B  mean={r['detail']['mean_entropy']}  max={r['detail']['max_entropy']}")
         lines.append("")
 
+    # Hardcoded secrets — high-impact finding
+    if d.get("secrets"):
+        lines.append(f"  {c.bold}{c.red}hardcoded secrets — CRITICAL{c.reset}  "
+                     f"{c.dim}(static keys/IVs visible in binary){c.reset}")
+        for s in d["secrets"]:
+            sev_color = _verdict_color(c, s.get("severity", "warn"))
+            kind = s["kind"].upper()
+            lines.append(f"    {sev_color}[{kind}]{c.reset} in {c.bold}{s['function_name']}{c.reset}  "
+                         f"@ {s['target_va']}  size={s['size']}B  ent={s['entropy']}")
+            lines.append(f"        {c.dim}{s['bytes_hex']}{c.reset}")
+            lines.append(f"        {c.dim}↳ {s['rationale']}{c.reset}")
+        lines.append("")
+
     # Summary actionables
     weak = d["summary"]["weak_or_broken"]
     if weak:
@@ -305,6 +408,13 @@ def render_text(d: dict, color: bool | None = None) -> str:
         for algo in weak:
             info = algo_info(algo)
             lines.append(f"    {c.red}!{c.reset} {algo}: {info['reason']}")
+        lines.append("")
+
+    # X-ray visualization
+    if show_xray and d.get("_xray"):
+        lines.append(f"  {c.bold}binary x-ray{c.reset}  {c.dim}(file layout: entropy gradient + crypto markers){c.reset}")
+        for line in d["_xray"]:
+            lines.append(f"    {line}")
         lines.append("")
 
     return "\n".join(lines)

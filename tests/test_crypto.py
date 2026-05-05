@@ -367,3 +367,272 @@ class TestIntegration:
         assert r.format == "macho"
         assert r.architecture in ("arm64", "x86_64")
         assert len(r.sections) > 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 2: xrefs, secrets, fingerprint, x-ray, diff
+# ──────────────────────────────────────────────────────────────────────
+
+class TestXrefResolution:
+    def test_find_function_returns_containing_function(self):
+        from cb.crypto.xref import find_function, FunctionInfo
+        funcs = [
+            FunctionInfo(va=0x1000, size=0x100, name="alpha"),
+            FunctionInfo(va=0x1100, size=0x80, name="beta"),
+            FunctionInfo(va=0x1200, size=0x40, name="gamma"),
+        ]
+        assert find_function(funcs, 0x1000).name == "alpha"
+        assert find_function(funcs, 0x10ff).name == "alpha"
+        assert find_function(funcs, 0x1100).name == "beta"
+        assert find_function(funcs, 0x1230).name == "gamma"
+        assert find_function(funcs, 0x500) is None
+        assert find_function(funcs, 0x1240) is None  # past gamma
+
+    def test_hit_index_lookup(self):
+        from cb.crypto.scanner import Hit
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS
+        from cb.crypto.xref import _build_hit_index, _find_hit
+        fp = CRYPTO_FINGERPRINTS[0]
+        h = Hit(fingerprint=fp, file_offset=0, virtual_address=0x1000)
+        ranges = _build_hit_index([h])
+        # Inside the hit
+        assert _find_hit(ranges, 0x1000) == 0
+        assert _find_hit(ranges, 0x1000 + len(fp.bytes) - 1) == 0
+        # Outside
+        assert _find_hit(ranges, 0x1000 + len(fp.bytes)) is None
+        assert _find_hit(ranges, 0xfff) is None
+
+    def test_executable_section_filter(self):
+        from cb.crypto.scanner import SectionInfo
+        from cb.crypto.xref import _executable_sections
+        secs = [
+            SectionInfo("__text", "__TEXT", 0x1000, 0x1000, 0x1000),
+            SectionInfo("__const", "__TEXT", 0x2000, 0x1000, 0x2000),
+            SectionInfo("__data", "__DATA", 0x3000, 0x1000, 0x3000),
+        ]
+        out = _executable_sections(secs, "macho")
+        assert len(out) == 1
+        assert out[0].name == "__text"
+
+    @pytest.mark.skipif(
+        not os.path.exists("/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"),
+        reason="openssl@3 not installed",
+    )
+    def test_libcrypto_xrefs_attribute_chacha20(self):
+        from cb.crypto.scanner import scan_binary
+        from cb.crypto.heuristics import disambiguate_dual_use
+        from cb.crypto.xref import resolve_xrefs
+
+        path = "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+        r = scan_binary(path)
+        r.hits = disambiguate_dual_use(r.hits)
+        xrefs = resolve_xrefs(path, r, max_xrefs=2000)
+
+        # Find ChaCha20 sigma hit and verify it's referenced from a chacha function
+        for i, h in enumerate(r.hits):
+            if h.fingerprint.algorithm == "chacha20":
+                refs = xrefs.get(i, [])
+                if refs:
+                    assert any("chacha" in r.function_name.lower() for r in refs), \
+                        f"Expected a chacha-named caller; got {[r.function_name for r in refs]}"
+                    return
+        pytest.skip("No ChaCha20 hits found in libcrypto (unusual)")
+
+
+class TestSecretsDetection:
+    def test_va_to_offset(self):
+        from cb.crypto.scanner import SectionInfo
+        from cb.crypto.secrets import _va_to_offset
+        secs = [SectionInfo("__data", "__DATA", 0x1000, 0x1000, 0x10000)]
+        # VA 0x10100 maps to file offset 0x1100
+        result = _va_to_offset(secs, 0x10100, 16)
+        assert result is not None
+        off, sec = result
+        assert off == 0x1100
+
+    def test_va_to_offset_out_of_range(self):
+        from cb.crypto.scanner import SectionInfo
+        from cb.crypto.secrets import _va_to_offset
+        secs = [SectionInfo("__data", "__DATA", 0x1000, 0x1000, 0x10000)]
+        # Past the end
+        assert _va_to_offset(secs, 0x11000, 16) is None
+        # Before
+        assert _va_to_offset(secs, 0x9000, 16) is None
+
+    def test_textual_filter(self):
+        from cb.crypto.secrets import _looks_textual
+        assert _looks_textual(b"hello world hello world hello!!!")
+        assert not _looks_textual(b"\x00\xff" * 16)
+
+    def test_zero_filter(self):
+        from cb.crypto.secrets import _all_zero, _all_same_byte
+        assert _all_zero(b"\x00" * 16)
+        assert _all_same_byte(b"\xaa" * 16)
+        assert not _all_same_byte(b"\xaa\xab" * 8)
+
+
+class TestFingerprintHash:
+    def test_stable_for_same_algorithms(self):
+        from cb.crypto.report import crypto_fingerprint
+        a = [{"algorithm": "aes", "family": "block-cipher"},
+             {"algorithm": "sha256", "family": "hash"}]
+        b = [{"algorithm": "sha256", "family": "hash"},
+             {"algorithm": "aes", "family": "block-cipher"}]
+        assert crypto_fingerprint(a) == crypto_fingerprint(b)
+
+    def test_changes_on_algorithm_change(self):
+        from cb.crypto.report import crypto_fingerprint
+        a = [{"algorithm": "aes", "family": "block-cipher"}]
+        b = [{"algorithm": "chacha20", "family": "stream-cipher"}]
+        assert crypto_fingerprint(a) != crypto_fingerprint(b)
+
+    def test_ignores_library_markers(self):
+        from cb.crypto.report import crypto_fingerprint
+        a = [{"algorithm": "aes", "family": "block-cipher"},
+             {"algorithm": "openssl", "family": "library-marker"}]
+        b = [{"algorithm": "aes", "family": "block-cipher"},
+             {"algorithm": "boringssl", "family": "library-marker"}]
+        # Fingerprint should be the same regardless of library
+        assert crypto_fingerprint(a) == crypto_fingerprint(b)
+
+    def test_format(self):
+        from cb.crypto.report import crypto_fingerprint
+        fp = crypto_fingerprint([{"algorithm": "aes", "family": "block-cipher"}])
+        # 64 bits = 16 hex chars
+        assert len(fp) == 16
+        assert all(c in "0123456789abcdef" for c in fp)
+
+
+class TestXrayVisualization:
+    def test_renders_basic(self, tmp_path):
+        from cb.crypto.scanner import scan_binary
+        from cb.crypto.xray import render_xray
+        f = tmp_path / "blob.bin"
+        # Some bytes with reasonable entropy
+        f.write_bytes(bytes(range(256)) * 32)  # 8KB
+        r = scan_binary(str(f))
+        lines = render_xray(str(f), r, width=40, color=False)
+        # 4 layout rows + legend (only if hits)
+        assert len(lines) >= 4
+        # All rows should be the configured width (we don't strip ansi here)
+        for ln in lines[:4]:
+            assert len(ln) <= 40 + 4  # small slack for any safety
+
+    def test_empty_file(self, tmp_path):
+        from cb.crypto.scanner import scan_binary
+        from cb.crypto.xray import render_xray
+        f = tmp_path / "empty.bin"
+        f.write_bytes(b"")
+        r = scan_binary(str(f))
+        lines = render_xray(str(f), r, width=40, color=False)
+        assert lines == ["[empty file]"]
+
+    def test_includes_section_indicators_for_macho(self):
+        # We test the function builds a non-empty output on libsodium
+        if not os.path.exists("/opt/homebrew/opt/libsodium/lib/libsodium.26.dylib"):
+            pytest.skip("libsodium not installed")
+        from cb.crypto.scanner import scan_binary
+        from cb.crypto.xray import render_xray
+        path = "/opt/homebrew/opt/libsodium/lib/libsodium.26.dylib"
+        r = scan_binary(path)
+        lines = render_xray(path, r, width=80, color=False)
+        # There should be a section-label line containing some non-space chars
+        sec_line = lines[0]
+        assert any(ch not in " ─" for ch in sec_line), \
+            f"Section label row had no markers: {sec_line!r}"
+
+
+class TestDiffMode:
+    def _profile(self, algos: list[tuple[str, str]]) -> dict:
+        from cb.crypto.report import crypto_fingerprint
+        algorithms = [{"algorithm": a, "family": "block-cipher", "verdict": v,
+                        "rationale": ""}
+                       for a, v in algos]
+        return {
+            "fingerprint": crypto_fingerprint(algorithms),
+            "algorithms": algorithms,
+        }
+
+    def test_added_removed_detected(self):
+        from cb.crypto.diff import diff_reports
+        old = self._profile([("aes", "ok"), ("md5", "critical")])
+        new = self._profile([("aes", "ok"), ("chacha20", "ok")])
+        d = diff_reports(old, new)
+        assert {a["algorithm"] for a in d.added} == {"chacha20"}
+        assert {a["algorithm"] for a in d.removed} == {"md5"}
+        assert {a["algorithm"] for a in d.common} == {"aes"}
+
+    def test_severity_change_detected(self):
+        from cb.crypto.diff import diff_reports
+        old = self._profile([("aes", "ok"), ("sha1", "ok")])
+        new = self._profile([("aes", "ok"), ("sha1", "warn")])
+        d = diff_reports(old, new)
+        assert any(s["algorithm"] == "sha1" and s["new_verdict"] == "warn"
+                   for s in d.severity_changes)
+
+    def test_fingerprint_matches_reflect_changes(self):
+        from cb.crypto.diff import diff_reports
+        old = self._profile([("aes", "ok")])
+        same = self._profile([("aes", "ok")])
+        d = diff_reports(old, same)
+        assert not d.fingerprint_changed
+        assert d.added == []
+        assert d.removed == []
+
+    def test_render_diff_text_no_changes(self):
+        from cb.crypto.diff import diff_reports, render_diff_text
+        a = self._profile([("aes", "ok")])
+        d = diff_reports(a, a)
+        out = render_diff_text(d, "old.bin", "new.bin", color=False)
+        assert "No crypto changes" in out
+
+    def test_render_diff_text_with_changes(self):
+        from cb.crypto.diff import diff_reports, render_diff_text
+        old = self._profile([("md5", "critical")])
+        new = self._profile([("sha256", "ok")])
+        d = diff_reports(old, new)
+        out = render_diff_text(d, "old.bin", "new.bin", color=False)
+        assert "added" in out
+        assert "removed" in out
+        assert "sha256" in out
+        assert "md5" in out
+
+
+class TestNewFingerprints:
+    def test_hmac_pads_in_catalog(self):
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS
+        names = {f.name for f in CRYPTO_FINGERPRINTS}
+        assert "HMAC ipad (64-byte block)" in names
+        assert "HMAC opad (64-byte block)" in names
+
+    def test_aes_rcon_in_catalog(self):
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS, aes_rcon
+        # First Rcon is 0x01, then 0x02, 0x04, 0x08, 0x10, ...
+        rcon = aes_rcon()
+        assert rcon[:5] == bytes([0x01, 0x02, 0x04, 0x08, 0x10])
+
+    def test_p384_curve_in_catalog(self):
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS
+        assert any(f.algorithm == "p384" for f in CRYPTO_FINGERPRINTS)
+
+    def test_p521_curve_in_catalog(self):
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS
+        assert any(f.algorithm == "p521" for f in CRYPTO_FINGERPRINTS)
+
+    def test_argon2_marker_detected(self, tmp_path):
+        from cb.crypto.scanner import scan_binary
+        f = tmp_path / "blob.bin"
+        f.write_bytes(b"junk junk junk $argon2id$v=19$m=65536$t=3$p=4$ junk")
+        r = scan_binary(str(f))
+        assert any(h.fingerprint.algorithm == "argon2" for h in r.hits)
+
+    def test_bcrypt_marker_detected(self, tmp_path):
+        from cb.crypto.scanner import scan_binary
+        f = tmp_path / "blob.bin"
+        f.write_bytes(b"junk junk $2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl junk")
+        r = scan_binary(str(f))
+        assert any(h.fingerprint.algorithm == "bcrypt" for h in r.hits)
+
+    def test_poly1305_clamp_in_catalog(self):
+        from cb.crypto.constants import CRYPTO_FINGERPRINTS
+        assert any(f.algorithm == "poly1305" for f in CRYPTO_FINGERPRINTS)

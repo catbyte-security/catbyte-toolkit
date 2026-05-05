@@ -613,6 +613,127 @@ def build_fingerprints() -> list[Fingerprint]:
                     "marker"),
     ]
 
+    # ── HMAC ipad / opad ──
+    # HMAC = H( (K XOR opad) || H( (K XOR ipad) || msg ) )
+    # ipad = 0x36 repeated, opad = 0x5C repeated. Some implementations
+    # compute K XOR opad / ipad on the fly; others precompute and store
+    # the pads. Look for either ipad or opad as a long run of one byte.
+    fps += [
+        Fingerprint("HMAC ipad (64-byte block)", "hmac", b"\x36" * 64,
+                    "any", "ok", 0.55,
+                    "Inner pad for HMAC over a 64-byte block hash (MD5/SHA-1/SHA-256). "
+                    "Long single-byte runs do appear elsewhere — combine with hash detection.",
+                    "marker"),
+        Fingerprint("HMAC opad (64-byte block)", "hmac", b"\x5c" * 64,
+                    "any", "ok", 0.55,
+                    "Outer pad for HMAC over a 64-byte block hash.",
+                    "marker"),
+        Fingerprint("HMAC ipad (128-byte block)", "hmac", b"\x36" * 128,
+                    "any", "ok", 0.7,
+                    "Inner pad for HMAC over a 128-byte block hash (SHA-512).",
+                    "marker"),
+        Fingerprint("HMAC opad (128-byte block)", "hmac", b"\x5c" * 128,
+                    "any", "ok", 0.7,
+                    "Outer pad for HMAC over a 128-byte block hash.",
+                    "marker"),
+    ]
+
+    # ── AES Rcon (round constants for key schedule) ──
+    fps += [
+        Fingerprint("AES Rcon", "aes", aes_rcon(), "any", "ok", 0.6,
+                    "AES key-schedule round constants. Short pattern — combine with S-box detection.",
+                    "table"),
+    ]
+
+    # ── AES-GCM gHash polynomial constant ──
+    # 0xe1 in highest byte, used in GHASH / GCM
+    fps += [
+        Fingerprint("AES-GCM GHASH polynomial",
+                    "aes-gcm",
+                    b"\xe1\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+                    "any", "ok", 0.5,
+                    "GHASH irreducible polynomial 0xe1 (GCM mode). Short pattern, low confidence on its own.",
+                    "marker"),
+    ]
+
+    # ── Poly1305 marker (clamping mask) ──
+    # Poly1305 r-clamping ANDs the key bytes with: 0x0f ff ff fc 0f ff ff fc 0f ff ff fc 0f ff ff 0f
+    # (in some byte order) — but it's often inlined as constants in code.
+    # Slightly more reliable: the 2^130-5 prime modulus is harder to disguise.
+    poly1305_clamp = bytes([0x0f, 0xff, 0xff, 0xfc, 0x0f, 0xff, 0xff, 0xfc,
+                             0x0f, 0xff, 0xff, 0xfc, 0x0f, 0xff, 0xff, 0x0f])
+    fps += [
+        Fingerprint("Poly1305 clamp mask", "poly1305", poly1305_clamp,
+                    "any", "ok", 0.7,
+                    "Poly1305 r-clamping mask. Combined with ChaCha20 detection → AEAD ChaCha20-Poly1305.",
+                    "marker"),
+    ]
+
+    # ── Additional NIST curves ──
+    # P-384
+    p384_p = (1 << 384) - (1 << 128) - (1 << 96) + (1 << 32) - 1
+    p384_n = 0xffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973
+    fps += [
+        Fingerprint("P-384 prime", "p384", p384_p.to_bytes(48, "big"),
+                    "be", "ok", 1.0,
+                    "NIST P-384 prime modulus. Larger ECC curve.",
+                    "curve"),
+        Fingerprint("P-384 group order", "p384", p384_n.to_bytes(48, "big"),
+                    "be", "ok", 1.0,
+                    "P-384 base-point order n.",
+                    "curve"),
+    ]
+
+    # P-521 (special — 521 bits = 66 bytes, top byte = 0x01)
+    p521_p = (1 << 521) - 1
+    fps += [
+        Fingerprint("P-521 prime", "p521", p521_p.to_bytes(66, "big"),
+                    "be", "ok", 0.95,
+                    "NIST P-521 prime (Mersenne prime 2^521 - 1).",
+                    "curve"),
+    ]
+
+    # Brainpool P256 r1 prime
+    bp256_p = 0xa9fb57dba1eea9bc3e660a909d838d726e3bf623d52620282013481d1f6e5377
+    fps += [
+        Fingerprint("Brainpool P256r1 prime", "brainpool",
+                    bp256_p.to_bytes(32, "big"), "be", "ok", 1.0,
+                    "Brainpool P256r1 prime. Used in some EU/government applications.",
+                    "curve"),
+    ]
+
+    # ── Password-hashing markers ──
+    fps += [
+        Fingerprint("scrypt marker string", "scrypt", b"$scrypt$",
+                    "any", "ok", 0.85,
+                    "scrypt encoded-hash prefix. Password hashing.",
+                    "marker"),
+        Fingerprint("Argon2 marker string", "argon2", b"$argon2",
+                    "any", "ok", 0.95,
+                    "Argon2 encoded-hash prefix (Argon2i/Argon2d/Argon2id).",
+                    "marker"),
+        Fingerprint("bcrypt marker string", "bcrypt", b"$2a$",
+                    "any", "ok", 0.85,
+                    "bcrypt encoded-hash prefix (also $2b$, $2y$).",
+                    "marker"),
+        Fingerprint("PBKDF2 marker string", "pbkdf2", b"PBKDF2",
+                    "any", "ok", 0.7,
+                    "PBKDF2 reference (often a function/symbol fragment).",
+                    "marker"),
+    ]
+
+    # ── X9.63 / NIST KDF identifier ──
+    fps += [
+        Fingerprint("X9.63 KDF marker", "kdf", b"X9.63",
+                    "any", "info", 0.5,
+                    "ANSI X9.63 KDF reference.",
+                    "marker"),
+    ]
+
+    # ── Bitcoin / Ethereum specific markers ──
+    fps += [
+    ]
+
     # ── RC4 detection (no constants — only structural heuristic) ──
     # RC4 has no fixed constants; we search for KSA pattern via its byte signatures
     # in the matchers module instead.
